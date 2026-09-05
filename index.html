@@ -253,88 +253,134 @@ async function importGoogleCalendarEvents(accessToken) {
   button.textContent = "Importing...";
 
   try {
-    const timeMin = new Date(currentYear, currentMonth, 1).toISOString();
-    const timeMax = new Date(currentYear, currentMonth + 1, 1).toISOString();
+    // Get all calendars available to the signed-in user.
+    const calendarResponse = await fetch(
+      "https://www.googleapis.com/calendar/v3/users/me/calendarList",
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`
+        }
+      }
+    );
 
-    const url = new URL("https://www.googleapis.com/calendar/v3/calendars/primary/events");
-    url.searchParams.set("timeMin", timeMin);
-    url.searchParams.set("timeMax", timeMax);
-    url.searchParams.set("singleEvents", "true");
-    url.searchParams.set("orderBy", "startTime");
-
-    const response = await fetch(url, {
-      headers: { Authorization: `Bearer ${accessToken}` }
-    });
-
-    if (!response.ok) {
-      const message = await response.text();
-      throw new Error(message);
+    if (!calendarResponse.ok) {
+      throw new Error("Could not retrieve your calendars.");
     }
 
-    const data = await response.json();
+    const calendarData = await calendarResponse.json();
+    const calendars = calendarData.items || [];
+
     const shifts = new Map();
-    
-    for (const event of data.items || []) {
 
-  // Only import events with "shift" in the title.
-  const title = (event.summary || "").toLowerCase();
+    // Check every accessible calendar.
+    for (const calendar of calendars) {
 
-  if (!title.includes("shift")) {
-    continue;
-  }
+      const timeMin = new Date(
+        currentYear,
+        currentMonth,
+        1
+      ).toISOString();
 
-  // Ignore all-day events.
-  if (!event.start?.dateTime || !event.end?.dateTime) {
-    continue;
-  }
+      const timeMax = new Date(
+        currentYear,
+        currentMonth + 1,
+        1
+      ).toISOString();
 
-  const start = new Date(event.start.dateTime);
-  const end = new Date(event.end.dateTime);
+      const url = new URL(
+        `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendar.id)}/events`
+      );
 
-  if (Number.isNaN(start) || Number.isNaN(end) || end <= start) {
-    continue;
-  }
+      url.searchParams.set("timeMin", timeMin);
+      url.searchParams.set("timeMax", timeMax);
+      url.searchParams.set("singleEvents", "true");
+      url.searchParams.set("orderBy", "startTime");
 
-  // Only import events from the selected month.
-  if (
-    start.getFullYear() !== currentYear ||
-    start.getMonth() !== currentMonth
-  ) {
-    continue;
-  }
+      const response = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`
+        }
+      });
 
-  const day = start.getDate();
+      // Skip calendars that cannot be read.
+      if (!response.ok) {
+        console.log(`Could not read calendar: ${calendar.summary}`);
+        continue;
+      }
 
-  // If there are multiple WORK events on the same day,
-  // keep the earliest start and latest end time.
-  const existing = shifts.get(day);
+      const data = await response.json();
 
-  if (!existing) {
-    shifts.set(day, { start, end });
-  } else {
-    if (start < existing.start) existing.start = start;
-    if (end > existing.end) existing.end = end;
-  }
-}
+      for (const event of data.items || []) {
 
-const toTime = date =>
-  `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+        // Only import events containing "shift" in the title.
+        const title = (event.summary || "").toLowerCase();
 
-for (const [day, shift] of shifts) {
-  set(day, "in", toTime(shift.start));
-  set(day, "out", toTime(shift.end));
-}
+        if (!title.includes("shift")) {
+          continue;
+        }
+
+        // Ignore all-day events.
+        if (!event.start?.dateTime || !event.end?.dateTime) {
+          continue;
+        }
+
+        const start = new Date(event.start.dateTime);
+        const end = new Date(event.end.dateTime);
+
+        if (
+          Number.isNaN(start) ||
+          Number.isNaN(end) ||
+          end <= start
+        ) {
+          continue;
+        }
+
+        // Only import events from the selected month.
+        if (
+          start.getFullYear() !== currentYear ||
+          start.getMonth() !== currentMonth
+        ) {
+          continue;
+        }
+
+        const day = start.getDate();
+        const existing = shifts.get(day);
+
+        // If multiple shifts exist on one day,
+        // use the earliest start and latest end.
+        if (!existing) {
+          shifts.set(day, { start, end });
+        } else {
+          if (start < existing.start) existing.start = start;
+          if (end > existing.end) existing.end = end;
+        }
+      }
+    }
+
+    const toTime = date =>
+      `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+
+    for (const [day, shift] of shifts) {
+      set(day, "in", toTime(shift.start));
+      set(day, "out", toTime(shift.end));
+    }
 
     render();
-    alert(shifts.size
-      ? `Imported ${shifts.size} day${shifts.size === 1 ? "" : "s"} from Google Calendar into ${monthNames[currentMonth]} ${currentYear}.`
-      : `No timed events were found for ${monthNames[currentMonth]} ${currentYear}.`);
+
+    alert(
+      shifts.size
+        ? `Imported ${shifts.size} shift day${shifts.size === 1 ? "" : "s"} from Google Calendar.`
+        : `No shifts were found for ${monthNames[currentMonth]} ${currentYear}.`
+    );
+
+  } catch (error) {
+    console.error(error);
+    alert("Could not import your Google Calendar events. Please try again.");
   } finally {
     button.disabled = false;
     button.textContent = originalText;
   }
 }
-
 document.getElementById("importCalendar").onclick = () => {
   if (!googleTokenClient) {
     alert("Google sign-in is still loading. Please wait a moment and try again.");
