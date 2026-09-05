@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Work Hours Tracker</title>
+<style>
+  :root {
+    --green: #2f6956;
+    --green-dark: #245443;
+    --yellow: #ffd966;
+    --line: #d8ddd9;
+    --bg: #f5f7f6;
+    --text: #303735;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+  .app { max-width: 900px; margin: auto; }
+  .top {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; margin-bottom: 16px;
+  }
+  h1 { margin: 0; font-size: 24px; }
+  .controls { display: flex; gap: 8px; align-items: center; }
+  button, select {
+    border: 1px solid #c9d0cc; background: white; border-radius: 8px;
+    padding: 9px 12px; font-size: 14px; cursor: pointer;
+  }
+  button:hover { background: #eef3f0; }
+  .month {
+    font-weight: 700; color: white; background: var(--green);
+    border-radius: 12px 12px 0 0; padding: 12px 16px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .month button { color: white; background: transparent; border-color: rgba(255,255,255,.35); }
+  table {
+    width: 100%; border-collapse: collapse; background: white;
+    box-shadow: 0 4px 18px rgba(0,0,0,.06);
+  }
+  th {
+    background: var(--green); color: white; padding: 11px 10px;
+    text-align: left; font-size: 13px; letter-spacing: .04em;
+  }
+  td { border-bottom: 1px solid var(--line); padding: 7px 10px; }
+  tr.sunday td { background: var(--yellow); }
+  td.date { width: 28%; }
+  td.hours { width: 20%; text-align: right; font-variant-numeric: tabular-nums; }
+  input[type=time] {
+    width: 100%; border: 0; background: transparent; padding: 6px 2px;
+    font-size: 16px; color: var(--text); outline: none;
+    font-variant-numeric: tabular-nums;
+  }
+  input[type=time]:focus {
+    background: #f0f5f2; border-radius: 6px;
+  }
+  .total td {
+    border-top: 2px solid var(--green);
+    border-bottom: 0; font-weight: 800; font-size: 18px;
+    padding-top: 12px; padding-bottom: 12px;
+  }
+  .total .label { text-align: right; color: var(--green-dark); }
+  .footer {
+    margin-top: 16px; display: flex; justify-content: space-between;
+    align-items: center; gap: 10px; flex-wrap: wrap;
+  }
+  .hint { color: #68716d; font-size: 13px; }
+  .actions { display: flex; gap: 8px; }
+  .primary { background: var(--green); color: white; border-color: var(--green); }
+  .primary:hover { background: var(--green-dark); }
+  @media (max-width: 600px) {
+    body { padding: 12px; }
+    td, th { padding: 7px 6px; }
+    td.date { width: 30%; }
+    input[type=time] { font-size: 14px; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="top">
+    <h1>Work Hours</h1>
+    <div class="controls">
+      <button id="prev">‹</button>
+      <select id="year"></select>
+      <button id="next">›</button>
+    </div>
+  </div>
+
+  <div class="month">
+    <span id="monthName"></span>
+    <span id="yearLabel"></span>
+  </div>
+
+  <table>
+    <thead>
+      <tr><th>DATE</th><th>IN</th><th>OUT</th><th style="text-align:right">HOURS</th></tr>
+    </thead>
+    <tbody id="rows"></tbody>
+    <tfoot>
+      <tr class="total">
+        <td></td><td></td><td class="label">MONTH TOTAL</td>
+        <td class="hours" id="total">0.0</td>
+      </tr>
+    </tfoot>
+  </table>
+
+  <div class="footer">
+    <div class="hint">Your entries are saved automatically in this browser.</div>
+    <div class="actions">
+      <button id="importCalendar">Import Google Calendar</button>
+      <button id="export">Export PDF</button>
+      <button id="clear" class="primary">Clear this month</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script>
+const monthNames = ["January","February","March","April","May","June",
+                    "July","August","September","October","November","December"];
+
+let current = new Date();
+let currentYear = current.getFullYear();
+let currentMonth = current.getMonth();
+
+const rowsEl = document.getElementById("rows");
+const yearEl = document.getElementById("year");
+const monthNameEl = document.getElementById("monthName");
+const yearLabelEl = document.getElementById("yearLabel");
+const totalEl = document.getElementById("total");
+
+for (let y = currentYear - 3; y <= currentYear + 3; y++) {
+  const o = document.createElement("option");
+  o.value = y; o.textContent = y;
+  yearEl.appendChild(o);
+}
+
+function key(day, field) {
+  return `workhours:${currentYear}-${String(currentMonth+1).padStart(2,'0')}-${String(day).padStart(2,'0')}:${field}`;
+}
+function get(day, field) { return localStorage.getItem(key(day, field)) || ""; }
+function set(day, field, value) {
+  if (value) localStorage.setItem(key(day, field), value);
+  else localStorage.removeItem(key(day, field));
+}
+
+function hoursBetween(a,b) {
+  if (!a || !b) return null;
+  let [ah,am] = a.split(":").map(Number);
+  let [bh,bm] = b.split(":").map(Number);
+  let start = ah*60+am, end = bh*60+bm;
+  if (end < start) end += 24*60; // supports overnight shifts
+  return (end-start)/60;
+}
+
+function render() {
+  yearEl.value = currentYear;
+  monthNameEl.textContent = monthNames[currentMonth];
+  yearLabelEl.textContent = currentYear;
+  rowsEl.innerHTML = "";
+
+  const days = new Date(currentYear, currentMonth+1, 0).getDate();
+  let total = 0;
+
+  for (let day=1; day<=days; day++) {
+    const d = new Date(currentYear, currentMonth, day);
+    const tr = document.createElement("tr");
+    if (d.getDay() === 0) tr.className = "sunday";
+
+    const inVal = get(day,"in"), outVal = get(day,"out");
+    const h = hoursBetween(inVal,outVal);
+    if (h !== null) total += h;
+
+    tr.innerHTML = `
+      <td class="date">${monthNames[currentMonth]} ${day}</td>
+      <td><input type="time" value="${inVal}" aria-label="In time"></td>
+      <td><input type="time" value="${outVal}" aria-label="Out time"></td>
+      <td class="hours">${h === null ? "" : h.toFixed(1)}</td>
+    `;
+
+    const inputs = tr.querySelectorAll("input");
+    inputs[0].addEventListener("change", e => {
+      set(day,"in",e.target.value); render();
+    });
+    inputs[1].addEventListener("change", e => {
+      set(day,"out",e.target.value); render();
+    });
+    rowsEl.appendChild(tr);
+  }
+  totalEl.textContent = total.toFixed(1);
+}
+
+document.getElementById("prev").onclick = () => {
+  currentMonth--;
+  if (currentMonth < 0) { currentMonth=11; currentYear--; }
+  render();
+};
+document.getElementById("next").onclick = () => {
+  currentMonth++;
+  if (currentMonth > 11) { currentMonth=0; currentYear++; }
+  render();
+};
+yearEl.onchange = () => { currentYear = Number(yearEl.value); render(); };
+
+document.getElementById("clear").onclick = () => {
+  if (!confirm(`Clear all work hours for ${monthNames[currentMonth]} ${currentYear}?`)) return;
+  const days = new Date(currentYear, currentMonth+1, 0).getDate();
+  for (let d=1; d<=days; d++) {
+    localStorage.removeItem(key(d,"in"));
+    localStorage.removeItem(key(d,"out"));
+  }
+  render();
+};
+
+// Import work shifts directly from Google Calendar using Google OAuth.
+const GOOGLE_CLIENT_ID = "885380290646-faach07lbno7n17uaa839o1icensa66e.apps.googleusercontent.com";
+const GOOGLE_CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
+let googleTokenClient;
+
+function initGoogleCalendar() {
+  if (!window.google?.accounts?.oauth2) {
+    setTimeout(initGoogleCalendar, 100);
+    return;
+  }
+
+  googleTokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: GOOGLE_CLIENT_ID,
+    scope: GOOGLE_CALENDAR_SCOPE,
+    callback: async (response) => {
+      if (response.error) {
+        alert(`Google sign-in failed: ${response.error}`);
+        return;
+      }
+      try {
+        await importGoogleCalendarEvents(response.access_token);
+      } catch (error) {
+        console.error(error);
+        alert("Could not import your Google Calendar events. Please try again.");
+      }
+    }
+  });
+}
+
+async function importGoogleCalendarEvents(accessToken) {
+  const button = document.getElementById("importCalendar");
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "Importing...";
+
+  try {
+    const timeMin = new Date(currentYear, currentMonth, 1).toISOString();
+    const timeMax = new Date(currentYear, currentMonth + 1, 1).toISOString();
+
+    const url = new URL("https://www.googleapis.com/calendar/v3/calendars/primary/events");
+    url.searchParams.set("timeMin", timeMin);
+    url.searchParams.set("timeMax", timeMax);
+    url.searchParams.set("singleEvents", "true");
+    url.searchParams.set("orderBy", "startTime");
+
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+
+    if (!response.ok) {
+      const message = await response.text();
+      throw new Error(message);
+    }
+
+    const data = await response.json();
+    const shifts = new Map();
+
+    for (const event of data.items || []) {
+      // Ignore all-day events.
+      if (!event.start?.dateTime || !event.end?.dateTime) continue;
+
+      const start = new Date(event.start.dateTime);
+      const end = new Date(event.end.dateTime);
+      if (Number.isNaN(start) || Number.isNaN(end) || end <= start) continue;
+      if (start.getFullYear() !== currentYear || start.getMonth() !== currentMonth) continue;
+
+      const day = start.getDate();
+      const existing = shifts.get(day);
+      if (!existing) {
+        shifts.set(day, { start, end });
+      } else {
+        if (start < existing.start) existing.start = start;
+        if (end > existing.end) existing.end = end;
+      }
+    }
+
+    const toTime = date =>
+      `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+
+    for (const [day, shift] of shifts) {
+      set(day, "in", toTime(shift.start));
+      set(day, "out", toTime(shift.end));
+    }
+
+    render();
+    alert(shifts.size
+      ? `Imported ${shifts.size} day${shifts.size === 1 ? "" : "s"} from Google Calendar into ${monthNames[currentMonth]} ${currentYear}.`
+      : `No timed events were found for ${monthNames[currentMonth]} ${currentYear}.`);
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
+}
+
+document.getElementById("importCalendar").onclick = () => {
+  if (!googleTokenClient) {
+    alert("Google sign-in is still loading. Please wait a moment and try again.");
+    return;
+  }
+  // Opens Google's account/sign-in and consent popup.
+  googleTokenClient.requestAccessToken({ prompt: "consent" });
+};
+
+initGoogleCalendar();
+
+document.getElementById("export").onclick = () => {
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF();
+  const days = new Date(currentYear, currentMonth + 1, 0).getDate();
+  let total = 0;
+
+  doc.setFontSize(20);
+  doc.text("Work Hours Report", 14, 18);
+  doc.setFontSize(13);
+  doc.text(`${monthNames[currentMonth]} ${currentYear}`, 14, 27);
+
+  let y = 40;
+  doc.setFontSize(10);
+  doc.setFont(undefined, "bold");
+  doc.text("Date", 14, y);
+  doc.text("In", 90, y);
+  doc.text("Out", 120, y);
+  doc.text("Hours", 160, y);
+  doc.setFont(undefined, "normal");
+  y += 7;
+
+  for (let d = 1; d <= days; d++) {
+    const a = get(d, "in");
+    const b = get(d, "out");
+    const h = hoursBetween(a, b);
+    if (h !== null) total += h;
+
+    if (y > 280) {
+      doc.addPage();
+      y = 20;
+    }
+
+    doc.text(`${monthNames[currentMonth]} ${d}, ${currentYear}`, 14, y);
+    doc.text(a || "-", 90, y);
+    doc.text(b || "-", 120, y);
+    doc.text(h === null ? "-" : h.toFixed(1), 160, y);
+    y += 7;
+  }
+
+  y += 4;
+  doc.setFont(undefined, "bold");
+  doc.setFontSize(14);
+  doc.text(`Monthly Total: ${total.toFixed(1)} hours`, 14, y);
+  doc.save(`work-hours-${currentYear}-${String(currentMonth + 1).padStart(2, "0")}.pdf`);
+};
+
+render();
+</script>
+</body>
+</html>
