@@ -276,10 +276,10 @@ async function importGoogleCalendarEvents(accessToken) {
     
     for (const event of data.items || []) {
 
-  // Only import events with "work" in the title.
+  // Only import events with "shift" in the title.
   const title = (event.summary || "").toLowerCase();
 
-  if (!title.includes("work")) {
+  if (!title.includes("shift")) {
     continue;
   }
 
