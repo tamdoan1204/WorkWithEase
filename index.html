@@ -112,7 +112,6 @@
     <div class="hint">Your entries are saved automatically in this browser.</div>
     <div class="actions">
       <button id="importCalendar">Import Google Calendar</button>
-      <input id="calendarFile" type="file" accept=".ics,text/calendar" hidden>
       <button id="export">Export PDF</button>
       <button id="clear" class="primary">Clear this month</button>
     </div>
@@ -120,6 +119,7 @@
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <script>
 const monthNames = ["January","February","March","April","May","June",
                     "July","August","September","October","November","December"];
@@ -217,76 +217,110 @@ document.getElementById("clear").onclick = () => {
   render();
 };
 
-// Import work shifts from a Google Calendar .ics export.
-// Google Calendar events are matched to the currently displayed month.
-function parseICalDate(value) {
-  // Supports common iCalendar formats: YYYYMMDDTHHMMSS, optionally ending in Z.
-  const match = value.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})/);
-  if (!match) return null;
-  const [, year, month, day, hour, minute] = match.map(Number);
-  if (value.endsWith("Z")) {
-    const utc = new Date(Date.UTC(year, month - 1, day, hour, minute));
-    return new Date(utc.getTime() - utc.getTimezoneOffset() * 60000);
+// Import work shifts directly from Google Calendar using Google OAuth.
+const GOOGLE_CLIENT_ID = "885380290646-faach07lbno7n17uaa839o1icensa66e.apps.googleusercontent.com";
+const GOOGLE_CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
+let googleTokenClient;
+
+function initGoogleCalendar() {
+  if (!window.google?.accounts?.oauth2) {
+    setTimeout(initGoogleCalendar, 100);
+    return;
   }
-  return new Date(year, month - 1, day, hour, minute);
+
+  googleTokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: GOOGLE_CLIENT_ID,
+    scope: GOOGLE_CALENDAR_SCOPE,
+    callback: async (response) => {
+      if (response.error) {
+        alert(`Google sign-in failed: ${response.error}`);
+        return;
+      }
+      try {
+        await importGoogleCalendarEvents(response.access_token);
+      } catch (error) {
+        console.error(error);
+        alert("Could not import your Google Calendar events. Please try again.");
+      }
+    }
+  });
 }
 
-function unfoldICalLines(text) {
-  return text.replace(/\r?\n[ \t]/g, "").split(/\r?\n/);
-}
-
-document.getElementById("importCalendar").onclick = () => {
-  document.getElementById("calendarFile").click();
-};
-
-document.getElementById("calendarFile").addEventListener("change", async e => {
-  const file = e.target.files[0];
-  if (!file) return;
+async function importGoogleCalendarEvents(accessToken) {
+  const button = document.getElementById("importCalendar");
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "Importing...";
 
   try {
-    const text = await file.text();
-    const lines = unfoldICalLines(text);
-    const events = [];
-    let event = null;
+    const timeMin = new Date(currentYear, currentMonth, 1).toISOString();
+    const timeMax = new Date(currentYear, currentMonth + 1, 1).toISOString();
 
-    for (const line of lines) {
-      if (line === "BEGIN:VEVENT") { event = {}; continue; }
-      if (line === "END:VEVENT") {
-        if (event?.start && event?.end) events.push(event);
-        event = null;
-        continue;
-      }
-      if (!event) continue;
-      if (line.startsWith("DTSTART")) event.start = line.split(":").slice(1).join(":");
-      if (line.startsWith("DTEND")) event.end = line.split(":").slice(1).join(":");
+    const url = new URL("https://www.googleapis.com/calendar/v3/calendars/primary/events");
+    url.searchParams.set("timeMin", timeMin);
+    url.searchParams.set("timeMax", timeMax);
+    url.searchParams.set("singleEvents", "true");
+    url.searchParams.set("orderBy", "startTime");
+
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+
+    if (!response.ok) {
+      const message = await response.text();
+      throw new Error(message);
     }
 
-    let imported = 0;
-    for (const event of events) {
-      const start = parseICalDate(event.start);
-      const end = parseICalDate(event.end);
-      if (!start || !end || end <= start) continue;
+    const data = await response.json();
+    const shifts = new Map();
 
-      // Import only events whose start date is in the selected month.
+    for (const event of data.items || []) {
+      // Ignore all-day events.
+      if (!event.start?.dateTime || !event.end?.dateTime) continue;
+
+      const start = new Date(event.start.dateTime);
+      const end = new Date(event.end.dateTime);
+      if (Number.isNaN(start) || Number.isNaN(end) || end <= start) continue;
       if (start.getFullYear() !== currentYear || start.getMonth() !== currentMonth) continue;
 
       const day = start.getDate();
-      const toTime = d => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-      set(day, "in", toTime(start));
-      set(day, "out", toTime(end));
-      imported++;
+      const existing = shifts.get(day);
+      if (!existing) {
+        shifts.set(day, { start, end });
+      } else {
+        if (start < existing.start) existing.start = start;
+        if (end > existing.end) existing.end = end;
+      }
+    }
+
+    const toTime = date =>
+      `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+
+    for (const [day, shift] of shifts) {
+      set(day, "in", toTime(shift.start));
+      set(day, "out", toTime(shift.end));
     }
 
     render();
-    alert(imported
-      ? `Imported ${imported} calendar event${imported === 1 ? "" : "s"} into ${monthNames[currentMonth]} ${currentYear}.`
-      : `No timed calendar events were found for ${monthNames[currentMonth]} ${currentYear}.`);
-  } catch (err) {
-    alert("Could not read this calendar file. Please export your Google Calendar as an .ics file and try again.");
+    alert(shifts.size
+      ? `Imported ${shifts.size} day${shifts.size === 1 ? "" : "s"} from Google Calendar into ${monthNames[currentMonth]} ${currentYear}.`
+      : `No timed events were found for ${monthNames[currentMonth]} ${currentYear}.`);
   } finally {
-    e.target.value = "";
+    button.disabled = false;
+    button.textContent = originalText;
   }
-});
+}
+
+document.getElementById("importCalendar").onclick = () => {
+  if (!googleTokenClient) {
+    alert("Google sign-in is still loading. Please wait a moment and try again.");
+    return;
+  }
+  // Opens Google's account/sign-in and consent popup.
+  googleTokenClient.requestAccessToken({ prompt: "consent" });
+};
+
+initGoogleCalendar();
 
 document.getElementById("export").onclick = () => {
   const { jsPDF } = window.jspdf;
